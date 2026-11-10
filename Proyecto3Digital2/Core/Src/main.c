@@ -15,6 +15,7 @@
  *
  ******************************************************************************
  */
+
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
@@ -51,10 +52,19 @@ UART_HandleTypeDef huart1;
 UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
-extern const uint16_t fondo[];
+
 extern const uint16_t fondo_imagen[76800];
 
 
+extern const uint16_t lateral_izquierda[4900];
+extern const uint16_t lateral_centro[4900];
+extern const uint16_t lateral_derecha[4900];
+
+extern const uint16_t vertical_arriba[4900];
+extern const uint16_t vertical_centro[4900];
+extern const uint16_t vertical_abajo[4900];
+
+extern const uint16_t precaucion[900];
 
 float offset_gx = 0.0f;
 float offset_gy = 0.0f;
@@ -73,6 +83,19 @@ static void MX_I2C1_Init(void);
 void MPU6050_Calibrar_Giroscopio(void);
 
 void LCD_MostrarFondo(void);
+void LCD_MovLateral(const uint16_t *imagen);
+void LCD_MovVertical(const uint16_t *imagen);
+
+void LCD_Rectangulo(uint16_t x, uint16_t y, uint16_t ancho, uint16_t alto, uint16_t color);
+void LCD_DibujarPaneles(void);
+
+void LCD_MostrarAngulos(float roll, float pitch);
+
+void LCD_ActualizarManos(float roll, float pitch);
+
+void LCD_MostrarPrecaucion(uint16_t x, uint16_t y);
+void LCD_ActualizarPrecauciones(float roll, float pitch);
+
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -118,11 +141,20 @@ int main(void)
   // Inicializar pantalla TFT
   LCD_Init();
 
-  // Pintar pantalla de azul
-  LCD_Clear(0x001F);
-  HAL_Delay(1000);
-
+  // Dibujar fondo
   LCD_MostrarFondo();
+
+  // Dibujar paneles de angulos
+  LCD_DibujarPaneles();
+
+  // Dibujar manos
+  LCD_MovLateral(lateral_centro);
+  LCD_MovVertical(vertical_centro);
+
+  // Titulos de los paneles
+  LCD_Print("ROLL", 35, 60, 1, 0x001F, 0xFFFF);
+
+  LCD_Print("PITCH", 35, 150, 1, 0x001F, 0xFFFF);
 
 
   uint8_t despertar = 0x00;
@@ -166,7 +198,7 @@ int main(void)
   }
 
   // Dar tiempo al sensor para estabilizarse
-  HAL_Delay(500);
+  HAL_Delay(100);
 
   // Avisar que comenzara la calibracion
   char inicio[] = "Calibrando giroscopio. No mover sensor...\r\n";
@@ -233,6 +265,15 @@ int main(void)
           roll = atan2f(ay_g, az_g) * 180.0f / 3.14159265f;
 
           pitch = atan2f(-ax_g, sqrtf(ay_g * ay_g + az_g * az_g)) * 180.0f / 3.14159265f;
+
+          // Actualizar angulos en la pantalla
+          LCD_MostrarAngulos(roll, pitch);
+
+          // Actualizar imagenes segun los angulos
+          LCD_ActualizarManos(roll, pitch);
+
+          // Actualizar advertencias
+          LCD_ActualizarPrecauciones(roll, pitch);
 
           // Preparar mensaje
           snprintf(mensaje, sizeof(mensaje),"Ax: %.2f g | Ay: %.2f g | Az: %.2f g\r\n", ax_g, ay_g, az_g);
@@ -491,7 +532,7 @@ static void MX_GPIO_Init(void)
   HAL_GPIO_WritePin(LCD_DC_GPIO_Port, LCD_DC_Pin, GPIO_PIN_RESET);
 
   /*Configure GPIO pin Output Level */
-  HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin|SD_CS_Pin, GPIO_PIN_RESET);
+  HAL_GPIO_WritePin(GPIOB, LCD_CS_Pin|SD_CS_Pin, GPIO_PIN_SET);
 
   /*Configure GPIO pin : B1_Pin */
   GPIO_InitStruct.Pin = B1_Pin;
@@ -541,6 +582,198 @@ void LCD_MostrarFondo(void)
     }
 }
 
+
+void LCD_MovLateral(const uint16_t *imagen)
+{
+    SetWindows(220, 50, 289, 119);
+
+    for (uint32_t i = 0; i < 4900; i++)
+    {
+        uint16_t color = imagen[i];
+
+        LCD_DATA(color >> 8);
+        LCD_DATA(color & 0xFF);
+    }
+}
+
+void LCD_MovVertical(const uint16_t *imagen)
+{
+    SetWindows(220, 140, 289, 209);
+
+    for (uint32_t i = 0; i < 4900; i++)
+    {
+        uint16_t color = imagen[i];
+
+        LCD_DATA(color >> 8);
+        LCD_DATA(color & 0xFF);
+    }
+}
+
+void LCD_MostrarAngulos(float roll, float pitch)
+{
+    char texto[20];
+
+    // Limpiar area del angulo Roll
+    LCD_Rectangulo(25, 80, 133, 32, 0xFFFF);
+
+    snprintf(texto, sizeof(texto), "%.1f", roll);
+
+    // Numero grande
+    LCD_Print(texto, 30, 85, 2, 0x001F, 0xFFFF);
+
+    // Unidad
+    LCD_Print("deg", 115, 92, 1, 0x001F, 0xFFFF);
+
+
+    // Limpiar area del angulo Pitch
+    LCD_Rectangulo(25, 170, 133, 32, 0xFFFF);
+
+    snprintf(texto, sizeof(texto), "%.1f", pitch);
+
+    // Numero grande
+    LCD_Print(texto, 30, 175, 2, 0x001F, 0xFFFF);
+
+    // Unidad
+    LCD_Print("deg", 115, 182, 1, 0x001F, 0xFFFF);
+}
+
+void LCD_ActualizarManos(float roll, float pitch)
+{
+    static int8_t estado_lateral = 0;
+    static int8_t estado_vertical = 0;
+
+    int8_t nuevo_lateral;
+    int8_t nuevo_vertical;
+
+    // Determinar posicion lateral
+    if (roll < -15.0f)
+    {
+        nuevo_lateral = -1;
+    }
+    else if (roll > 15.0f)
+    {
+        nuevo_lateral = 1;
+    }
+    else
+    {
+        nuevo_lateral = 0;
+    }
+
+    // Determinar posicion vertical
+    if (pitch < -15.0f)
+    {
+        nuevo_vertical = -1;
+    }
+    else if (pitch > 15.0f)
+    {
+        nuevo_vertical = 1;
+    }
+    else
+    {
+        nuevo_vertical = 0;
+    }
+
+    // Actualizar imagen lateral solo si cambia
+    if (nuevo_lateral != estado_lateral)
+    {
+        if (nuevo_lateral == -1)
+        {
+            LCD_MovLateral(lateral_izquierda);
+        }
+        else if (nuevo_lateral == 1)
+        {
+            LCD_MovLateral(lateral_derecha);
+        }
+        else
+        {
+            LCD_MovLateral(lateral_centro);
+        }
+
+        estado_lateral = nuevo_lateral;
+    }
+
+    // Actualizar imagen vertical solo si cambia
+    if (nuevo_vertical != estado_vertical)
+    {
+        if (nuevo_vertical == -1)
+        {
+            LCD_MovVertical(vertical_arriba);
+        }
+        else if (nuevo_vertical == 1)
+        {
+            LCD_MovVertical(vertical_abajo);
+        }
+        else
+        {
+            LCD_MovVertical(vertical_centro);
+        }
+
+        estado_vertical = nuevo_vertical;
+    }
+}
+
+void LCD_MostrarPrecaucion(uint16_t x, uint16_t y)
+{
+    uint16_t color;
+
+    SetWindows(x, y, x + 29, y + 29);
+
+    for (uint32_t i = 0; i < 900; i++)
+    {
+        color = precaucion[i];
+
+        LCD_DATA(color >> 8);
+        LCD_DATA(color & 0xFF);
+    }
+}
+
+void LCD_ActualizarPrecauciones(float roll, float pitch)
+{
+    static uint8_t alerta_roll = 0;
+    static uint8_t alerta_pitch = 0;
+
+    uint8_t nueva_alerta_roll;
+    uint8_t nueva_alerta_pitch;
+
+    // Limites de prueba
+    float limite_roll = 30.0f;
+    float limite_pitch = 30.0f;
+
+    // Comprobar si se superaron los limites
+    nueva_alerta_roll = (fabsf(roll) > limite_roll);
+    nueva_alerta_pitch = (fabsf(pitch) > limite_pitch);
+
+    // Actualizar advertencia Roll
+    if (nueva_alerta_roll != alerta_roll)
+    {
+        if (nueva_alerta_roll)
+        {
+            LCD_MostrarPrecaucion(164, 55);
+        }
+        else
+        {
+            LCD_Rectangulo(164, 55, 30, 30, 0xFFFF);
+        }
+
+        alerta_roll = nueva_alerta_roll;
+    }
+
+    // Actualizar advertencia Pitch
+    if (nueva_alerta_pitch != alerta_pitch)
+    {
+        if (nueva_alerta_pitch)
+        {
+            LCD_MostrarPrecaucion(164, 145);
+        }
+        else
+        {
+            LCD_Rectangulo(164, 145, 30, 30, 0xFFFF);
+        }
+
+        alerta_pitch = nueva_alerta_pitch;
+    }
+}
+
 void MPU6050_Calibrar_Giroscopio(void)
 {
     uint8_t datos[6];
@@ -585,6 +818,40 @@ void MPU6050_Calibrar_Giroscopio(void)
     {
         Error_Handler();
     }
+}
+
+void LCD_Rectangulo(uint16_t x, uint16_t y, uint16_t ancho, uint16_t alto, uint16_t color)
+{
+    if (ancho == 0 || alto == 0 || x >= 320 || y >= 240 || ancho > 320 - x || alto > 240 - y)
+    {
+        return;
+    }
+
+    SetWindows(x, y, x + ancho - 1, y + alto - 1);
+
+    for (uint32_t i = 0; i < (uint32_t)ancho * alto; i++)
+    {
+        LCD_DATA(color >> 8);
+        LCD_DATA(color & 0xFF);
+    }
+}
+
+void LCD_DibujarPaneles(void)
+{
+    uint16_t celeste = 0x05BF;
+    uint16_t blanco = 0xFFFF;
+
+    // Panel Roll: borde celeste
+    LCD_Rectangulo(20, 50, 180, 70, celeste);
+
+    // Interior blanco
+    LCD_Rectangulo(23, 53, 174, 64, blanco);
+
+    // Panel Pitch: borde celeste
+    LCD_Rectangulo(20, 140, 180, 70, celeste);
+
+    // Interior blanco
+    LCD_Rectangulo(23, 143, 174, 64, blanco);
 }
 
 /* USER CODE END 4 */
