@@ -19,6 +19,7 @@
 /* USER CODE END Header */
 /* Includes ------------------------------------------------------------------*/
 #include "main.h"
+#include "fatfs.h"
 
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
@@ -53,6 +54,9 @@ UART_HandleTypeDef huart2;
 
 /* USER CODE BEGIN PV */
 
+static volatile uint8_t uart1RecibioByte = 0;
+
+
 extern const uint16_t fondo_imagen[76800];
 
 
@@ -69,6 +73,11 @@ extern const uint16_t precaucion[900];
 float offset_gx = 0.0f;
 float offset_gy = 0.0f;
 float offset_gz = 0.0f;
+
+static uint8_t datoN1;
+
+static volatile char lineaN1[64];
+static volatile uint8_t lineaN1Lista = 0;
 
 /* USER CODE END PV */
 
@@ -95,6 +104,20 @@ void LCD_ActualizarManos(float roll, float pitch);
 
 void LCD_MostrarPrecaucion(uint16_t x, uint16_t y);
 void LCD_ActualizarPrecauciones(float roll, float pitch);
+
+void UART_EnviarAngulos(float roll, float pitch);
+
+void SPI1_VelocidadBaja(void);
+void SPI1_VelocidadAlta(void);
+
+static void N1_Enviar(const char *mensaje);
+static void N1_Error(unsigned int id, const char *detalle);
+static void N1_Ejecutar(const char *linea);
+static void N1_Procesar(void);
+
+static HAL_StatusTypeDef MPU6050_LeerAngulos(float *roll, float *pitch);
+static FRESULT SD_GuardarMedicion(unsigned int id, uint32_t tiempo, float roll, float pitch);
+
 
 /* USER CODE END PFP */
 
@@ -136,6 +159,7 @@ int main(void)
   MX_SPI1_Init();
   MX_USART1_UART_Init();
   MX_I2C1_Init();
+  MX_FATFS_Init();
   /* USER CODE BEGIN 2 */
 
   // Inicializar pantalla TFT
@@ -156,6 +180,23 @@ int main(void)
 
   LCD_Print("PITCH", 35, 150, 1, 0x001F, 0xFFFF);
 
+
+  HAL_StatusTypeDef prueba_i2c;
+
+  prueba_i2c = HAL_I2C_IsDeviceReady(&hi2c1, 0x68 << 1, 3, 100);
+
+  if (prueba_i2c == HAL_OK)
+  {
+      char mensaje[] = "MPU6050 responde por I2C\r\n";
+
+      HAL_UART_Transmit(&huart2, (uint8_t *)mensaje, strlen(mensaje), 100);
+  }
+  else
+  {
+      char mensaje[] = "MPU6050 NO responde por I2C\r\n";
+
+      HAL_UART_Transmit(&huart2, (uint8_t *)mensaje, strlen(mensaje), 100);
+  }
 
   uint8_t despertar = 0x00;
 
@@ -214,24 +255,49 @@ int main(void)
 
   	    HAL_Delay(2000);
 
+  	  HAL_NVIC_SetPriority(USART1_IRQn, 0, 0);
+  	  HAL_NVIC_EnableIRQ(USART1_IRQn);
+
+  	  if (HAL_UART_Receive_IT(&huart1, &datoN1, 1) != HAL_OK)
+  	  {
+  	      Error_Handler();
+  	  }
+
+  	  const char lista[] = "NUCLEO2 LISTA\r\n";
+
+  	  HAL_UART_Transmit(
+  	      &huart2,
+  	      (uint8_t *)lista,
+  	      sizeof(lista) - 1U,
+  	      100
+  	  );
+
 
   /* USER CODE END 2 */
 
   /* Infinite loop */
   /* USER CODE BEGIN WHILE */
-	/*while (1) {
 
-	    char mensaje[] = "HOLA";
-
-	    HAL_UART_Transmit(&huart1, (uint8_t *)mensaje, strlen(mensaje), HAL_MAX_DELAY);
-
-	    HAL_Delay(1000);
-
-
-
-	}*/
   while (1)
   {
+
+
+	  if (uart1RecibioByte)
+	  {
+	      uart1RecibioByte = 0;
+
+	      char aviso[] = "UART1: byte recibido\r\n";
+
+	      HAL_UART_Transmit(
+	          &huart2,
+	          (uint8_t *)aviso,
+	          strlen(aviso),
+	          100
+	      );
+	  }
+
+	  N1_Procesar();
+
       uint8_t datos[6];
 
       int16_t Ax, Ay, Az;
@@ -274,6 +340,9 @@ int main(void)
 
           // Actualizar advertencias
           LCD_ActualizarPrecauciones(roll, pitch);
+
+          // Enviar mediciones a Nucleo 1
+          //UART_EnviarAngulos(roll, pitch);
 
           // Preparar mensaje
           snprintf(mensaje, sizeof(mensaje),"Ax: %.2f g | Ay: %.2f g | Az: %.2f g\r\n", ax_g, ay_g, az_g);
@@ -319,9 +388,9 @@ int main(void)
     /* USER CODE END WHILE */
 
     /* USER CODE BEGIN 3 */
-	}
-  /* USER CODE END 3 */
 
+  /* USER CODE END 3 */
+}
 
 /**
   * @brief System Clock Configuration
@@ -427,7 +496,7 @@ static void MX_SPI1_Init(void)
   hspi1.Init.CLKPolarity = SPI_POLARITY_LOW;
   hspi1.Init.CLKPhase = SPI_PHASE_1EDGE;
   hspi1.Init.NSS = SPI_NSS_SOFT;
-  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_2;
+  hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
   hspi1.Init.FirstBit = SPI_FIRSTBIT_MSB;
   hspi1.Init.TIMode = SPI_TIMODE_DISABLE;
   hspi1.Init.CRCCalculation = SPI_CRCCALCULATION_DISABLE;
@@ -566,6 +635,432 @@ static void MX_GPIO_Init(void)
 }
 
 /* USER CODE BEGIN 4 */
+
+static void N1_Enviar(const char *mensaje)
+{
+    // Enviar respuesta hacia Nucleo 1
+    HAL_StatusTypeDef resultado;
+
+    resultado = HAL_UART_Transmit(
+        &huart1,
+        (uint8_t *)mensaje,
+        (uint16_t)strlen(mensaje),
+        100
+    );
+
+    // Mostrar respuesta enviada en Hercules
+    char debug[130];
+
+    snprintf(debug, sizeof(debug),
+             "TX Nucleo 2: %s | HAL: %d\r\n",
+             mensaje, (int)resultado);
+
+    HAL_UART_Transmit(
+        &huart2,
+        (uint8_t *)debug,
+        strlen(debug),
+        100
+    );
+}
+
+
+// Informar un error asociado a una solicitud.
+static void N1_Error(unsigned int id, const char *detalle)
+{
+    char respuesta[96];
+
+    snprintf(
+        respuesta,
+        sizeof(respuesta),
+        "ERROR;%u;%s\r\n",
+        id,
+        detalle
+    );
+
+    N1_Enviar(respuesta);
+}
+
+
+
+// Ejecutar una solicitud completa.
+static void N1_Ejecutar(const char *linea)
+{
+
+	// Diagnostico: mostrar comando completo recibido
+	char debug_uart[100];
+
+	snprintf(debug_uart, sizeof(debug_uart),
+	         "Comando recibido N1: %s\r\n", linea);
+
+	HAL_UART_Transmit(&huart2,
+	                  (uint8_t *)debug_uart,
+	                  strlen(debug_uart),
+	                  100);
+
+    char comando[16];
+    char extra;
+    unsigned int id;
+
+    if (sscanf(linea, "%15[^;];%u%c", comando, &id, &extra) != 2 ||
+        id == 0U ||
+        id > 65535U)
+    {
+        N1_Error(0, "FORMATO_INVALIDO");
+        return;
+    }
+
+
+    if (strcmp(comando, "guardar") == 0)
+    {
+        float roll;
+        float pitch;
+
+        // Tomar una nueva medicion del MPU6050
+        HAL_StatusTypeDef estado = MPU6050_LeerAngulos(&roll, &pitch);
+
+        if (estado != HAL_OK)
+        {
+            N1_Error(id, "LECTURA_SENSOR");
+            return;
+        }
+
+        // Obtener tiempo de la medicion
+        uint32_t tiempo = HAL_GetTick();
+
+        // Guardar nueva medicion en la microSD
+        FRESULT resultado = SD_GuardarMedicion(id, tiempo, roll, pitch);
+
+        if (resultado == FR_OK)
+        {
+            char respuesta[64];
+
+            snprintf(respuesta, sizeof(respuesta), "GUARDADO;%u\r\n", id);
+
+            N1_Enviar(respuesta);
+        }
+        else
+        {
+            char detalle[40];
+
+            snprintf(detalle, sizeof(detalle), "SD_ERROR_%u", (unsigned int)resultado);
+
+            N1_Error(id, detalle);
+        }
+
+        return;
+    }
+
+
+    if (strcmp(comando, "leer") != 0)
+    {
+        N1_Error(id, "COMANDO_INVALIDO");
+        return;
+    }
+
+    char respuesta[96];
+
+    // Nucleo 1 activa el sonido al recibir esta confirmacion.
+    snprintf(
+        respuesta,
+        sizeof(respuesta),
+        "INICIO;%u\r\n",
+        id
+    );
+
+    N1_Enviar(respuesta);
+
+    // Leer acelerometro: suficiente para calcular inclinacion.
+    uint8_t datos[6];
+
+    if (HAL_I2C_Mem_Read(
+            &hi2c1,
+            0x68U << 1,
+            0x3B,
+            I2C_MEMADD_SIZE_8BIT,
+            datos,
+            6,
+            100
+        ) != HAL_OK)
+    {
+        N1_Error(id, "LECTURA_SENSOR");
+        return;
+    }
+
+    int16_t ax =
+        (int16_t)(((uint16_t)datos[0] << 8) | datos[1]);
+
+    int16_t ay =
+        (int16_t)(((uint16_t)datos[2] << 8) | datos[3]);
+
+    int16_t az =
+        (int16_t)(((uint16_t)datos[4] << 8) | datos[5]);
+
+    if (ax == 0 && ay == 0 && az == 0)
+    {
+        N1_Error(id, "VECTOR_NULO");
+        return;
+    }
+
+    float ax_g = ax / 16384.0f;
+    float ay_g = ay / 16384.0f;
+    float az_g = az / 16384.0f;
+
+    float roll =
+        atan2f(ay_g, az_g) * 180.0f / 3.14159265f;
+
+    float pitch =
+        atan2f(
+            -ax_g,
+            sqrtf(ay_g * ay_g + az_g * az_g)
+        ) * 180.0f / 3.14159265f;
+
+    // Usar las funciones de pantalla de TU proyecto.
+    LCD_MostrarAngulos(roll, pitch);
+    LCD_ActualizarManos(roll, pitch);
+    LCD_ActualizarPrecauciones(roll, pitch);
+
+
+    // Transmitir angulos como enteros en centesimas de grado.
+    int rollCdeg = (int)lroundf(roll * 100.0f);
+    int pitchCdeg = (int)lroundf(pitch * 100.0f);
+
+    snprintf(
+        respuesta,
+        sizeof(respuesta),
+        "DATOS;%u;%d;%d\r\n",
+        id,
+        rollCdeg,
+        pitchCdeg
+    );
+
+    N1_Enviar(respuesta);
+}
+
+
+// Procesar una linea recibida, fuera de la interrupcion.
+static void N1_Procesar(void)
+{
+    uint8_t lista = lineaN1Lista;
+
+    if (lista == 0U)
+    {
+        return;
+    }
+
+    if (lista == 2U)
+    {
+        lineaN1Lista = 0;
+        N1_Error(0, "LINEA_INVALIDA");
+        return;
+    }
+
+    // Copiar mientras la interrupcion conserva la linea.
+    char copia[64];
+
+    for (uint8_t i = 0; i < sizeof(copia); i++)
+    {
+        copia[i] = lineaN1[i];
+
+        if (copia[i] == '\0')
+        {
+            break;
+        }
+    }
+
+    copia[sizeof(copia) - 1U] = '\0';
+
+    lineaN1Lista = 0;
+
+    N1_Ejecutar(copia);
+}
+
+
+// Recibir caracteres sin hacer lecturas I2C ni dibujar en la ISR.
+void HAL_UART_RxCpltCallback(UART_HandleTypeDef *huart)
+{
+    static uint8_t posicion = 0;
+    static uint8_t descartar = 0;
+
+    if (huart->Instance != USART1)
+    {
+        return;
+    }
+
+    if (lineaN1Lista == 0U)
+    {
+        char c = (char)datoN1;
+        uart1RecibioByte = 1;
+
+        if (c == '\n')
+        {
+            lineaN1[posicion] = '\0';
+
+            if (descartar)
+            {
+                lineaN1Lista = 2;
+            }
+            else if (posicion > 0U)
+            {
+                lineaN1Lista = 1;
+            }
+
+            posicion = 0;
+            descartar = 0;
+        }
+        else if (c != '\r' && !descartar)
+        {
+            if (c != '\0' &&
+                posicion < sizeof(lineaN1) - 1U)
+            {
+                lineaN1[posicion++] = c;
+            }
+            else
+            {
+                descartar = 1;
+            }
+        }
+    }
+
+    HAL_UART_Receive_IT(&huart1, &datoN1, 1);
+}
+
+static HAL_StatusTypeDef MPU6050_LeerAngulos( float *roll, float *pitch)
+{
+    uint8_t datos[6];
+
+    if (roll == NULL || pitch == NULL)
+    {
+        return HAL_ERROR;
+    }
+
+    HAL_StatusTypeDef estado = HAL_I2C_Mem_Read(&hi2c1, 0x68 << 1, 0x3B, I2C_MEMADD_SIZE_8BIT, datos, 6, 100);
+
+    if (estado != HAL_OK)
+    {
+        return estado;
+    }
+
+    int16_t Ax = (int16_t)(((uint16_t)datos[0] << 8) | datos[1]
+    );
+
+    int16_t Ay = (int16_t)(((uint16_t)datos[2] << 8) | datos[3]
+    );
+
+    int16_t Az = (int16_t)(((uint16_t)datos[4] << 8) | datos[5]
+    );
+
+    if (Ax == 0 && Ay == 0 && Az == 0)
+    {
+        return HAL_ERROR;
+    }
+
+    float ax_g = Ax / 16384.0f;
+    float ay_g = Ay / 16384.0f;
+    float az_g = Az / 16384.0f;
+
+    *roll = atan2f(ay_g, az_g) * 180.0f / 3.14159265f;
+
+    *pitch = atan2f(-ax_g, sqrtf(ay_g * ay_g + az_g * az_g)) * 180.0f / 3.14159265f;
+
+    return HAL_OK;
+}
+
+
+static FRESULT SD_GuardarMedicion(unsigned int id, uint32_t tiempo, float roll, float pitch)
+{
+    FATFS fs;
+    FIL archivo;
+    FRESULT resultado;
+    FRESULT cierre;
+    UINT escritos;
+
+    char linea[100];
+
+    const char cabecera[] = "ID,Tiempo_ms,Roll_deg,Pitch_deg\r\n";
+
+    // Montar tarjeta microSD
+    resultado = f_mount(&fs, "", 1);
+
+    if (resultado != FR_OK)
+    {
+        f_mount(NULL, "", 0);
+        return resultado;
+    }
+
+    // Abrir archivo sin borrar datos anteriores
+    resultado = f_open(&archivo, "DATOS.CSV", FA_OPEN_ALWAYS | FA_WRITE);
+
+    if (resultado != FR_OK)
+    {
+        f_mount(NULL, "", 0);
+        return resultado;
+    }
+
+    // Si el archivo esta vacio, escribir cabecera
+    if (f_size(&archivo) == 0)
+    {
+        resultado = f_write(&archivo, cabecera, sizeof(cabecera) - 1, &escritos);
+
+        if (resultado != FR_OK ||
+            escritos != sizeof(cabecera) - 1)
+        {
+            if (resultado == FR_OK)
+                resultado = FR_DISK_ERR;
+
+            goto finalizar;
+        }
+    }
+
+    // Colocar cursor al final
+    resultado = f_lseek(&archivo, f_size(&archivo));
+
+    if (resultado != FR_OK)
+        goto finalizar;
+
+    // Preparar medicion
+    int longitud = snprintf(
+        linea,
+        sizeof(linea),
+        "%u,%lu,%.2f,%.2f\r\n",
+        id,
+        (unsigned long)tiempo,
+        roll,
+        pitch
+    );
+
+    if (longitud <= 0 ||
+        longitud >= (int)sizeof(linea))
+    {
+        resultado = FR_INVALID_PARAMETER;
+        goto finalizar;
+    }
+
+    // Escribir medicion
+    resultado = f_write(&archivo, linea, (UINT)longitud, &escritos);
+
+    if (resultado == FR_OK &&
+        escritos != (UINT)longitud)
+    {
+        resultado = FR_DISK_ERR;
+    }
+
+finalizar:
+
+    // Cerrar archivo
+    cierre = f_close(&archivo);
+
+    if (resultado == FR_OK)
+    {
+        resultado = cierre;
+    }
+
+    // Desmontar microSD
+    f_mount(NULL, "", 0);
+
+    return resultado;
+}
+
+
 
 void LCD_MostrarFondo(void)
 {
@@ -771,6 +1266,62 @@ void LCD_ActualizarPrecauciones(float roll, float pitch)
         }
 
         alerta_pitch = nueva_alerta_pitch;
+    }
+}
+
+void UART_EnviarAngulos(float roll, float pitch)
+{
+    char mensaje[64];
+
+    int longitud = snprintf(mensaje, sizeof(mensaje), "ROLL:%.1f,PITCH:%.1f\r\n", roll, pitch);
+
+    if (longitud > 0 && longitud < sizeof(mensaje))
+    {
+        HAL_UART_Transmit(&huart1, (uint8_t *)mensaje, (uint16_t)longitud, 100);
+    }
+}
+
+void SPI1_VelocidadBaja(void)
+{
+    // Deseleccionar pantalla y SD
+    HAL_GPIO_WritePin(LCD_CS_GPIO_Port,
+                      LCD_CS_Pin, GPIO_PIN_SET);
+
+    HAL_GPIO_WritePin(SD_CS_GPIO_Port,
+                      SD_CS_Pin, GPIO_PIN_SET);
+
+    // Desactivar SPI
+    HAL_SPI_DeInit(&hspi1);
+
+    // Configurar prescaler 256
+    hspi1.Init.BaudRatePrescaler =
+        SPI_BAUDRATEPRESCALER_256;
+
+    // Reiniciar SPI
+    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    {
+        Error_Handler();
+    }
+}
+
+
+void SPI1_VelocidadAlta(void)
+{
+    // Deseleccionar pantalla y SD
+    HAL_GPIO_WritePin(LCD_CS_GPIO_Port, LCD_CS_Pin, GPIO_PIN_SET);
+
+    HAL_GPIO_WritePin(SD_CS_GPIO_Port, SD_CS_Pin, GPIO_PIN_SET);
+
+    // Desactivar SPI
+    HAL_SPI_DeInit(&hspi1);
+
+    // Restaurar prescaler 8
+    hspi1.Init.BaudRatePrescaler = SPI_BAUDRATEPRESCALER_8;
+
+    // Reiniciar SPI
+    if (HAL_SPI_Init(&hspi1) != HAL_OK)
+    {
+        Error_Handler();
     }
 }
 

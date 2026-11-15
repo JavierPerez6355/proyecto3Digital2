@@ -52,6 +52,10 @@
 /* Private user code ---------------------------------------------------------*/
 /* USER CODE BEGIN 0 */
 
+extern volatile uint16_t Timer1;
+extern volatile uint16_t Timer2;
+
+extern UART_HandleTypeDef huart1;
 /* USER CODE END 0 */
 
 /* External variables --------------------------------------------------------*/
@@ -187,6 +191,15 @@ void SysTick_Handler(void)
   /* USER CODE END SysTick_IRQn 0 */
   HAL_IncTick();
   /* USER CODE BEGIN SysTick_IRQn 1 */
+  if (Timer1 > 0)
+  {
+      Timer1--;
+  }
+
+  if (Timer2 > 0)
+  {
+      Timer2--;
+  }
 
   /* USER CODE END SysTick_IRQn 1 */
 }
@@ -199,5 +212,9 @@ void SysTick_Handler(void)
 /******************************************************************************/
 
 /* USER CODE BEGIN 1 */
+void USART1_IRQHandler(void)
+{
+    HAL_UART_IRQHandler(&huart1);
+}
 
 /* USER CODE END 1 */
